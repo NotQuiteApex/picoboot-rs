@@ -42,7 +42,7 @@ impl<T: UsbContext> Drop for PicobootConnection<T> {
         if self.has_kernel_driver {
             self.handle
                 .attach_kernel_driver(self.iface)
-                .expect("could not retach kernel driver")
+                .expect("could not retach kernel driver");
         }
     }
 }
@@ -63,94 +63,81 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// - [`Error::UsbDetachKernelDriverFailure`]
     /// - [`Error::UsbClaimInterfaceFailure`]
     /// - [`Error::UsbSetAltSettingFailure`]
-    pub fn new(mut ctx: T, vidpid: impl Into<Option<(u16, u16)>>) -> Result<Self> {
-        let (device, target_id) = match vidpid.into() {
+    ///
+    /// # Panics
+    /// - If the appropriate USB device is found but cannot be opened, this function will panic.
+    pub fn new(mut ctx: T, vidpid: Option<(u16, u16)>) -> Result<Self> {
+        // simple heuristic for determining target type
+        let dev = match vidpid {
             Some((vid, pid)) => {
-                // simple heuristic for determining target type
-                let target_id = if vid == PICOBOOT_VID && pid == PICOBOOT_PID_RP2040 {
-                    TargetID::Rp2040
-                } else {
-                    TargetID::Rp2350
+                let id = match (vid, pid) {
+                    (PICOBOOT_VID, PICOBOOT_PID_RP2040) => TargetID::Rp2040,
+                    _ => TargetID::Rp2350,
                 };
-
-                if let Some(device) = Self::open_device(&mut ctx, vid, pid) {
-                    (Some(device), Some(target_id))
-                } else {
-                    (None, None)
-                }
+                Self::open_device(&mut ctx, vid, pid).map(|d| (d, id))
             }
-            None => {
-                if let Some(device) = Self::open_device(&mut ctx, PICOBOOT_VID, PICOBOOT_PID_RP2040)
-                {
-                    (Some(device), Some(TargetID::Rp2040))
+            None => [
+                (PICOBOOT_VID, PICOBOOT_PID_RP2040, TargetID::Rp2040),
+                (PICOBOOT_VID, PICOBOOT_PID_RP2350, TargetID::Rp2350),
+            ]
+            .into_iter()
+            .find_map(|(vid, pid, id)| Self::open_device(&mut ctx, vid, pid).map(|d| (d, id))),
+        };
+
+        let Some(((device, desc, handle), target_id)) = dev else {
+            return Err(Error::UsbDeviceNotFound);
+        };
+
+        let e1 = Self::get_endpoint(&device, 255, 0, 0, Direction::In, TransferType::Bulk);
+        let e2 = Self::get_endpoint(&device, 255, 0, 0, Direction::Out, TransferType::Bulk);
+
+        let (cfg, iface, setting, in_addr, out_addr) = match (e1, e2) {
+            (None, _) | (_, None) => return Err(Error::UsbEndpointsNotFound),
+            (Some((c1, i1, s1, in_addr)), Some((c2, i2, s2, out_addr))) => {
+                if (c1, i1, s1) == (c2, i2, s2) {
+                    (c2, i2, s2, in_addr, out_addr)
                 } else {
-                    if let Some(device) =
-                        Self::open_device(&mut ctx, PICOBOOT_VID, PICOBOOT_PID_RP2350)
-                    {
-                        (Some(device), Some(TargetID::Rp2350))
-                    } else {
-                        (None, None)
-                    }
+                    return Err(Error::UsbEndpointsUnexpected);
                 }
             }
         };
 
-        match device {
-            Some((device, desc, handle)) => {
-                let e1 = Self::get_endpoint(&device, 255, 0, 0, Direction::In, TransferType::Bulk);
-                let e2 = Self::get_endpoint(&device, 255, 0, 0, Direction::Out, TransferType::Bulk);
+        let has_kernel_driver = if let Ok(true) = handle.kernel_driver_active(iface) {
+            handle
+                .detach_kernel_driver(iface)
+                .map_err(Error::UsbDetachKernelDriverFailure)?;
+            true
+        } else {
+            false
+        };
 
-                if e1.is_none() || e2.is_none() {
-                    return Err(Error::UsbEndpointsNotFound);
-                }
-
-                let (_cfg, _iface, _setting, in_addr) = e1.unwrap();
-                let (cfg, iface, setting, out_addr) = e2.unwrap();
-
-                if _cfg != cfg || _iface != iface || _setting != setting {
-                    return Err(Error::UsbEndpointsUnexpected);
-                }
-
-                let has_kernel_driver = match handle.kernel_driver_active(iface) {
-                    Ok(true) => {
-                        handle
-                            .detach_kernel_driver(iface)
-                            .map_err(|e| Error::UsbDetachKernelDriverFailure(e))?;
-                        true
-                    }
-                    _ => false,
-                };
-
-                if handle.set_active_configuration(cfg).is_err() {
-                    // println!("Warning: could not set USB active configuration");
-                }
-
-                handle
-                    .claim_interface(iface)
-                    .map_err(|e| Error::UsbClaimInterfaceFailure(e))?;
-                handle
-                    .set_alternate_setting(iface, setting)
-                    .map_err(|e| Error::UsbSetAltSettingFailure(e))?;
-
-                Ok(PicobootConnection {
-                    _context: ctx,
-                    _device: device,
-                    _desc: desc,
-                    handle: handle,
-
-                    _cfg: cfg,
-                    iface: iface,
-                    _setting: setting,
-                    in_addr: in_addr,
-                    out_addr: out_addr,
-
-                    cmd_token: 1,
-                    has_kernel_driver: has_kernel_driver,
-                    target_id: target_id.unwrap(),
-                })
-            }
-            None => Err(Error::UsbDeviceNotFound),
+        if handle.set_active_configuration(cfg).is_err() {
+            // println!("Warning: could not set USB active configuration");
         }
+
+        handle
+            .claim_interface(iface)
+            .map_err(Error::UsbClaimInterfaceFailure)?;
+        handle
+            .set_alternate_setting(iface, setting)
+            .map_err(Error::UsbSetAltSettingFailure)?;
+
+        Ok(PicobootConnection {
+            _context: ctx,
+            _device: device,
+            _desc: desc,
+            handle,
+
+            _cfg: cfg,
+            iface,
+            _setting: setting,
+            in_addr,
+            out_addr,
+
+            cmd_token: 1,
+            has_kernel_driver,
+            target_id,
+        })
     }
 
     fn open_device(
@@ -158,11 +145,7 @@ impl<T: UsbContext> PicobootConnection<T> {
         vid: u16,
         pid: u16,
     ) -> Option<(Device<T>, DeviceDescriptor, DeviceHandle<T>)> {
-        let devices = match ctx.devices() {
-            Ok(d) => d,
-            Err(_) => return None,
-        };
-
+        let devices = ctx.devices().ok()?;
         for device in devices.iter() {
             let device_desc = match device.device_descriptor() {
                 Ok(d) => d,
@@ -223,16 +206,16 @@ impl<T: UsbContext> PicobootConnection<T> {
             }
         }
 
-        return None;
+        None
     }
 
     fn bulk_read(&mut self, buf_size: usize, check: bool) -> Result<Vec<u8>> {
-        let mut buf: Vec<u8> = vec![0; buf_size]; // [0; SECTOR_SIZE];
+        let mut buf = vec![0; buf_size];
         let timeout = std::time::Duration::from_secs(3);
         let len = self
             .handle
             .read_bulk(self.in_addr, &mut buf, timeout)
-            .map_err(|e| Error::UsbReadBulkFailure(e))?;
+            .map_err(Error::UsbReadBulkFailure)?;
 
         if check && len != buf_size {
             return Err(Error::UsbReadBulkMismatch);
@@ -242,12 +225,12 @@ impl<T: UsbContext> PicobootConnection<T> {
         Ok(buf)
     }
 
-    fn bulk_write(&mut self, mut buf: &[u8], check: bool) -> Result<()> {
+    fn bulk_write(&mut self, buf: &[u8], check: bool) -> Result<()> {
         let timeout = std::time::Duration::from_secs(5);
         let len = self
             .handle
-            .write_bulk(self.out_addr, &mut buf, timeout)
-            .map_err(|e| Error::UsbWriteBulkFailure(e))?;
+            .write_bulk(self.out_addr, buf, timeout)
+            .map_err(Error::UsbWriteBulkFailure)?;
 
         if check && len != buf.len() {
             return Err(Error::UsbWriteBulkMismatch);
@@ -270,21 +253,21 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// - [`Error::UsbReadBulkMismatch`]
     pub fn cmd(&mut self, cmd: PicobootCmd, buf: &[u8]) -> Result<Vec<u8>> {
         let cmd = cmd.set_token(self.cmd_token);
-        self.cmd_token = self.cmd_token + 1;
+        self.cmd_token += 1;
 
         // write command
-        let cmdu8 = bincode::serialize(&cmd).map_err(|e| Error::CmdSerializeFailure(e))?;
+        let cmdu8 = bincode::serialize(&cmd).map_err(Error::CmdSerializeFailure)?;
         self.bulk_write(cmdu8.as_slice(), true)?;
         let _stat = self.get_command_status();
 
         // if we're reading or writing a buffer
         let l = cmd.get_transfer_len().try_into().unwrap();
-        let mut res: Option<Vec<_>> = Some(vec![]);
+        let mut res = vec![];
         if l != 0 {
             if ((cmd.get_cmd_id() as u8) & 0x80) != 0 {
-                res = Some(self.bulk_read(l, true)?);
+                res = self.bulk_read(l, true)?;
             } else {
-                self.bulk_write(buf, true)?
+                self.bulk_write(buf, true)?;
             }
             let _stat = self.get_command_status();
         }
@@ -296,7 +279,7 @@ impl<T: UsbContext> PicobootConnection<T> {
             self.bulk_read(1, false)?;
         }
 
-        Ok(res.unwrap())
+        Ok(res)
     }
 
     /// Requests non-exclusive access with the device, and does not close the
@@ -328,9 +311,8 @@ impl<T: UsbContext> PicobootConnection<T> {
     }
 
     fn set_exclusive_access(&mut self, exclusive: u8) -> Result<()> {
-        Ok(self
-            .cmd(PicobootCmd::exclusive_access(exclusive), &[0u8; 0])
-            .map(|_| ())?)
+        self.cmd(PicobootCmd::exclusive_access(exclusive), &[0u8; 0])?;
+        Ok(())
     }
 
     /// Reboots the device with a specified program counter, stack pointer, and
@@ -343,9 +325,8 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// # Errors:
     /// - Any produced by [`Self::cmd`]
     pub fn reboot(&mut self, pc: u32, sp: u32, delay: u32) -> Result<()> {
-        Ok(self
-            .cmd(PicobootCmd::reboot(pc, sp, delay), &[0u8; 0])
-            .map(|_| ())?)
+        self.cmd(PicobootCmd::reboot(pc, sp, delay), &[0u8; 0])?;
+        Ok(())
     }
 
     /// Reboots the device with a delay in milliseconds. (Only for RP2350)
@@ -356,16 +337,12 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// - [`Error::CmdNotAllowedForTarget`]
     /// - Any produced by [`Self::cmd`]
     pub fn reboot2_normal(&mut self, delay: u32) -> Result<()> {
-        match self.target_id {
-            TargetID::Rp2040 => {
-                return Err(Error::CmdNotAllowedForTarget);
-            }
-            _ => {}
+        if let TargetID::Rp2040 = self.target_id {
+            return Err(Error::CmdNotAllowedForTarget);
         }
 
-        Ok(self
-            .cmd(PicobootCmd::reboot2_normal(delay), &[0u8; 0])
-            .map(|_| ())?)
+        self.cmd(PicobootCmd::reboot2_normal(delay), &[0u8; 0])?;
+        Ok(())
     }
 
     /// Erases the flash memory of the device.
@@ -385,9 +362,8 @@ impl<T: UsbContext> PicobootConnection<T> {
             return Err(Error::EraseInvalidSize);
         }
 
-        Ok(self
-            .cmd(PicobootCmd::flash_erase(addr, size), &[0u8; 0])
-            .map(|_| ())?)
+        self.cmd(PicobootCmd::flash_erase(addr, size), &[0u8; 0])?;
+        Ok(())
     }
 
     /// Writes a buffer to the flash memory of the device.
@@ -403,9 +379,8 @@ impl<T: UsbContext> PicobootConnection<T> {
             return Err(Error::WriteInvalidAddr);
         }
 
-        Ok(self
-            .cmd(PicobootCmd::flash_write(addr, buf.len() as u32), buf)
-            .map(|_| ())?)
+        self.cmd(PicobootCmd::flash_write(addr, buf.len() as u32), buf)?;
+        Ok(())
     }
 
     /// Writes a buffer to the flash memory of the device.
@@ -424,7 +399,8 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// # Errors:
     /// - Any produced by [`Self::cmd`]
     pub fn enter_xip(&mut self) -> Result<()> {
-        Ok(self.cmd(PicobootCmd::enter_xip(), &[0u8; 0]).map(|_| ())?)
+        self.cmd(PicobootCmd::enter_xip(), &[0u8; 0])?;
+        Ok(())
     }
 
     /// Exits Flash XIP (execute-in-place) mode.
@@ -432,7 +408,8 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// # Errors:
     /// - Any produced by [`Self::cmd`]
     pub fn exit_xip(&mut self) -> Result<()> {
-        Ok(self.cmd(PicobootCmd::exit_xip(), &[0u8; 0]).map(|_| ())?)
+        self.cmd(PicobootCmd::exit_xip(), &[0u8; 0])?;
+        Ok(())
     }
 
     /// Resets PICOBOOT USB interface.
@@ -447,24 +424,15 @@ impl<T: UsbContext> PicobootConnection<T> {
     pub fn reset_interface(&mut self) -> Result<()> {
         self.handle
             .clear_halt(self.in_addr)
-            .map_err(|e| Error::UsbClearInAddrHalt(e))?;
+            .map_err(Error::UsbClearInAddrHalt)?;
         self.handle
             .clear_halt(self.out_addr)
-            .map_err(|e| Error::UsbClearOutAddrHalt(e))?;
+            .map_err(Error::UsbClearOutAddrHalt)?;
 
         let timeout = std::time::Duration::from_secs(1);
-        let mut buf = [0u8; 0];
-        let _res = self
-            .handle
-            .write_control(
-                0b01000001,
-                0b01000001,
-                0,
-                self.iface.into(),
-                &mut buf,
-                timeout,
-            )
-            .map_err(|e| Error::UsbResetInterfaceFailure(e))?;
+        self.handle
+            .write_control(0x41, 0x41, 0, self.iface.into(), &[0u8; 0], timeout)
+            .map_err(Error::UsbResetInterfaceFailure)?;
 
         Ok(())
     }
@@ -474,17 +442,9 @@ impl<T: UsbContext> PicobootConnection<T> {
         let mut buf = [0u8; 16];
         let _res = self
             .handle
-            .read_control(
-                0b11000001,
-                0b01000010,
-                0,
-                self.iface.into(),
-                &mut buf,
-                timeout,
-            )
-            .map_err(|e| Error::UsbGetCommandStatusFailure(e))?;
-        let buf: PicobootStatusCmd =
-            bincode::deserialize(&buf).map_err(|e| Error::CmdDeserializeFailure(e))?;
+            .read_control(0xC1, 0x42, 0, self.iface.into(), &mut buf, timeout)
+            .map_err(Error::UsbGetCommandStatusFailure)?;
+        let buf = bincode::deserialize(&buf).map_err(Error::CmdDeserializeFailure)?;
 
         Ok(buf)
     }

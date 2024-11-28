@@ -92,7 +92,7 @@
 //!                         .expect("failed to reboot device");
 //!                 }
 //!                 TargetID::Rp2350 => conn.reboot2_normal(delay)
-//! 					.expect("failed to reboot device"),
+//!                     .expect("failed to reboot device"),
 //!             }
 //!         }
 //!         Err(e) => panic!("Could not initialize libusb: {}", e),
