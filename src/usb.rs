@@ -1,6 +1,6 @@
 use crate::{
     cmd::{PicobootCmd, PicobootError, PicobootStatusCmd, TargetID},
-    PICOBOOT_PID_RP2040, PICOBOOT_PID_RP2350, PICOBOOT_VID, PICO_PAGE_SIZE, PICO_SECTOR_SIZE,
+    PAGE_SIZE, PICOBOOT_PID_RP2040, PICOBOOT_PID_RP2350, PICOBOOT_VID, SECTOR_SIZE,
 };
 
 use bincode;
@@ -355,10 +355,10 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// - [`Error::EraseInvalidSize`]
     /// - Any produced by [`Self::cmd`]
     pub fn flash_erase(&mut self, addr: u32, size: u32) -> Result<()> {
-        if addr % PICO_SECTOR_SIZE != 0 {
+        if addr % SECTOR_SIZE != 0 {
             return Err(Error::EraseInvalidAddr);
         }
-        if size % PICO_SECTOR_SIZE != 0 {
+        if size % SECTOR_SIZE != 0 {
             return Err(Error::EraseInvalidSize);
         }
 
@@ -375,7 +375,7 @@ impl<T: UsbContext> PicobootConnection<T> {
     /// - [`Error::WriteInvalidAddr`]
     /// - Any produced by [`Self::cmd`]
     pub fn flash_write(&mut self, addr: u32, buf: &[u8]) -> Result<()> {
-        if addr % PICO_PAGE_SIZE != 0 {
+        if addr % PAGE_SIZE != 0 {
             return Err(Error::WriteInvalidAddr);
         }
 
