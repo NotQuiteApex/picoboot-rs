@@ -9,7 +9,7 @@ keywords = ["raspberry-pi", "rp2040", "rp2350", "picoboot", "picotool"]
 categories = ["embedded", "hardware-support"]
 readme = "README.md"
 
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.61"
 
