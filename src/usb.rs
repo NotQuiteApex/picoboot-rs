@@ -76,16 +76,25 @@ impl<T: UsbContext> PicobootConnection<T> {
                 };
                 Self::open_device(&mut ctx, vid, pid).map(|d| (d, id))
             }
-            None => [
-                (PICOBOOT_VID, PICOBOOT_PID_RP2040, TargetID::Rp2040),
-                (PICOBOOT_VID, PICOBOOT_PID_RP2350, TargetID::Rp2350),
-            ]
-            .into_iter()
-            .find_map(|(vid, pid, id)| Self::open_device(&mut ctx, vid, pid).map(|d| (d, id))),
+            None => match Self::open_device(&mut ctx, PICOBOOT_VID, PICOBOOT_PID_RP2040) {
+                Ok(d) => Ok((d, TargetID::Rp2040)),
+                Err(e) => match e {
+                    PicobootError::UsbDeviceNotFound => {
+                        match Self::open_device(&mut ctx, PICOBOOT_VID, PICOBOOT_PID_RP2350) {
+                            Ok(d) => Ok((d, TargetID::Rp2350)),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    _ => Err(e),
+                },
+            },
         };
 
-        let Some(((device, desc, handle), target_id)) = dev else {
-            return Err(Error::UsbDeviceNotFound);
+        let (device, desc, handle, target_id) = match dev {
+            Ok(((device, desc, handle), target_id)) => (device, desc, handle, target_id),
+            Err(e) => {
+                return Err(e);
+            }
         };
 
         let e1 = Self::get_endpoint(&device, 255, 0, 0, Direction::In, TransferType::Bulk);
@@ -144,8 +153,11 @@ impl<T: UsbContext> PicobootConnection<T> {
         ctx: &mut T,
         vid: u16,
         pid: u16,
-    ) -> Option<(Device<T>, DeviceDescriptor, DeviceHandle<T>)> {
-        let devices = ctx.devices().ok()?;
+    ) -> Result<(Device<T>, DeviceDescriptor, DeviceHandle<T>)> {
+        // ) -> Option<(Device<T>, DeviceDescriptor, DeviceHandle<T>)> {
+        let devices = ctx
+            .devices()
+            .map_err(|_| PicobootError::UsbDeviceNotFound)?;
         for device in devices.iter() {
             let device_desc = match device.device_descriptor() {
                 Ok(d) => d,
@@ -154,13 +166,13 @@ impl<T: UsbContext> PicobootConnection<T> {
 
             if device_desc.vendor_id() == vid && device_desc.product_id() == pid {
                 match device.open() {
-                    Ok(handle) => return Some((device, device_desc, handle)),
-                    Err(e) => panic!("Device found but failed to open: {}", e),
+                    Ok(handle) => return Ok((device, device_desc, handle)),
+                    Err(e) => return Err(PicobootError::UsbDeviceFailedToOpen(e)),
                 }
             }
         }
 
-        None
+        Err(PicobootError::UsbDeviceNotFound)
     }
 
     fn get_endpoint(

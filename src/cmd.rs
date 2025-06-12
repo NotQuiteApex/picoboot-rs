@@ -9,6 +9,9 @@ pub enum PicobootError {
     /// USB device not found.
     #[error("usb device not found")]
     UsbDeviceNotFound,
+    /// USB device found, but failed to open.
+    #[error("usb device found but can't open: {0}")]
+    UsbDeviceFailedToOpen(rusb::Error),
     /// Failed to get USB bulk endpoints.
     #[error("failed to get usb bulk endpoints")]
     UsbEndpointsNotFound,
